@@ -1,0 +1,56 @@
+services:
+  linuxdd-monitor:
+    build:
+      context: .
+      network: host
+    network_mode: host
+    container_name: linuxdd-monitor
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./chrome_profile:/app/chrome_profile
+    command:
+      - /bin/sh
+      - -c
+      - |
+        eval "$$(python - <<'PY'
+        import shlex
+        import yaml
+
+        with open("/app/config.yaml", "r", encoding="utf-8") as file_obj:
+            config = yaml.safe_load(file_obj) or {}
+        novnc = (config.get("global") or {}).get("novnc") or {}
+
+        def value(key, default):
+            raw = novnc.get(key, default)
+            if isinstance(raw, bool):
+                return str(raw).lower()
+            return str(raw)
+
+        values = {
+            "novnc_enabled": value("enabled", True),
+            "novnc_password": value("password", ""),
+            "novnc_listen_host": value("listen_host", "0.0.0.0"),
+            "novnc_port": value("port", 6080),
+            "novnc_vnc_port": value("vnc_port", 5900),
+            "novnc_display_number": value("display_number", 99),
+        }
+        for key, raw in values.items():
+            print(f"{key}={shlex.quote(raw)}")
+        PY
+        )"
+        display=":$${novnc_display_number}"
+        Xvfb "$$display" -screen 0 1280x900x24 -nolisten tcp &
+        sleep 1
+        DISPLAY="$$display" openbox >/tmp/openbox.log 2>&1 &
+        if [ "$${novnc_enabled}" = "true" ]; then
+          : "$${novnc_password:?set global.novnc.password in config.yaml before starting noVNC}"
+          x11vnc -storepasswd "$$novnc_password" /tmp/x11vnc.pass >/dev/null
+          x11vnc -display "$$display" -forever -shared -rfbauth /tmp/x11vnc.pass -rfbport "$$novnc_vnc_port" -listen 127.0.0.1 >/tmp/x11vnc.log 2>&1 &
+          websockify --web=/usr/share/novnc "$$novnc_listen_host:$$novnc_port" "localhost:$$novnc_vnc_port" >/tmp/websockify.log 2>&1 &
+        else
+          echo "noVNC disabled by global.novnc.enabled=false"
+        fi
+        exec env DISPLAY="$$display" python main.py
